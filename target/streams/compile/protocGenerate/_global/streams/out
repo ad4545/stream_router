@@ -1,0 +1,4 @@
+[0m[[0m[0mdebug[0m] [0m[0mInvalidating cache (input changed)[0m
+[0m[[0m[0minfo[0m] [0m[0mCompiling 1 protobuf files to /home/ubuntu/stream_router/target/scala-3.4.2/akka-grpc/main[0m
+[0m[[0m[0mdebug[0m] [0m[0mprotoc options:[0m
+[0m[[0m[0mdebug[0m] [0m[0mCompiling schema /home/ubuntu/stream_router/src/main/protobuf/Scan.proto[0m

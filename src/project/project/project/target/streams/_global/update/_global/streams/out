@@ -1,0 +1,7 @@
+[0m[[0m[0mdebug[0m] [0m[0mnot up to date. inChanged = true, force = false[0m
+[0m[[0m[0mdebug[0m] [0m[0mUpdating ProjectRef(uri("file:/home/ubuntu/test_grpc_stream/project/project/project/"), "test_grpc_stream-build-build-build")...[0m
+[0m[[0m[0minfo[0m] [0m[0mUpdating test_grpc_stream-build-build-build[0m
+[0m[[0m[0minfo[0m] [0m[0mResolved test_grpc_stream-build-build-build dependencies[0m
+[0m[[0m[0minfo[0m] [0m[0mFetching artifacts of test_grpc_stream-build-build-build[0m
+[0m[[0m[0minfo[0m] [0m[0mFetched artifacts of test_grpc_stream-build-build-build[0m
+[0m[[0m[0mdebug[0m] [0m[0mDone updating ProjectRef(uri("file:/home/ubuntu/test_grpc_stream/project/project/project/"), "test_grpc_stream-build-build-build")[0m
