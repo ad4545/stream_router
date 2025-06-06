@@ -3,17 +3,18 @@ package com.example
 import akka.actor.typed.ActorRef
 import akka.actor.typed.Behavior
 import akka.actor.typed.scaladsl.Behaviors
+import akka.stream.scaladsl.Source
 import com.example.StreamToActorMessaging._
-import com.example.FlowMessage.{FlowMessage, Invocation}
+import com.example.FlowMessage._
 
 object RouterActor {
   var counter: Int = 0
 
   def apply(
-    sourceActorRef: ActorRef[FlowMessage]
+    sourceActorRefs: Map[String, (ActorRef[FlowMessage], Source[Any, _])]
   ): Behavior[StreamToActorMessage[FlowMessage]] =
     Behaviors.setup { context =>
-      println(s"[RouterActor] Starting with sourceActorRef: $sourceActorRef")
+      println(s"[RouterActor] Starting with sourceActorRef: $sourceActorRefs")
       
       Behaviors.receiveMessage[StreamToActorMessage[FlowMessage]] {
         case StreamInit(replyTo) =>
@@ -30,10 +31,17 @@ object RouterActor {
           
           // Handle the element safely without casting
           element match {
-            case invocation: Invocation =>
-              println(s"[RouterActor] Processing Invocation: $invocation")
+            case scanInvocation: Invocation =>
+              println(s"[RouterActor] Processing Invocation---------: $scanInvocation")
               // Forward to the source actor if needed
-              // sourceActorRef ! invocation
+              val scanRef = sourceActorRefs("scan")._1
+              scanRef ! scanInvocation
+
+            case poseInvocation: PoseInvocation =>
+              println(s"[RouterActor] Processing PoseInvocation------: $poseInvocation")
+              // Forward to the source actor if needed
+              val scanRef = sourceActorRefs("pose")._1
+              scanRef ! poseInvocation  
               
             case other =>
               println(s"[RouterActor] Processing other FlowMessage type: ${other.getClass.getSimpleName}")

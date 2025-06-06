@@ -8,6 +8,7 @@ import akka.actor.typed.scaladsl.adapter.TypedActorContextOps
 import FlowMessage._
 // import akka.stream.ActorMaterializer
 import akka.stream.Materializer
+import akka.stream.scaladsl.Source
 import com.example.proto._
 import akka.stream.scaladsl.BroadcastHub
 import akka.stream.scaladsl.Keep
@@ -36,32 +37,44 @@ object RouterNode extends App {
       case object Complete extends FlowMessage
       case class Fail(ex: Exception) extends FlowMessage
 
-      val actorSource = ActorSource.actorRef[FlowMessage](
-        completionMatcher = { case Complete =>
-        },
-        failureMatcher = { case Fail(ex) =>
-          ex
-        },
-        bufferSize = 10,
-        overflowStrategy = OverflowStrategy.dropHead
-      )
 
-      val (grpcActorRef, source) = actorSource
-        .collect { case Invocation(i) =>
-          Scan(
-            angleMax = i.angleMax,
+      val streamConfigs: List[(String, PartialFunction[FlowMessage, Any])] = List(
+        ("scan", { 
+          case Invocation(i) => 
+            Scan(angleMax = i.angleMax,
             angleMin = i.angleMin,
             angleIncrement = i.angleIncrement,
             ranges = i.ranges,
-            scanTime = i.scanTime
+            scanTime = i.scanTime)
+        }: PartialFunction[FlowMessage, Any]),
+        
+        ("pose", { 
+          case PoseInvocation(p) => 
+            Pose(x = p.x, y = p.y, orientation = p.orientation)
+        }: PartialFunction[FlowMessage, Any])
+      )
+
+      val sourceActorRefs: Map[String, (ActorRef[FlowMessage], Source[Any, _])] = streamConfigs.map { 
+        case (name, collector) =>
+          val actorSource = ActorSource.actorRef[FlowMessage](
+            completionMatcher = { case Complete => },
+            failureMatcher = { case Fail(ex) => ex },
+            bufferSize = 10,
+            overflowStrategy = OverflowStrategy.dropHead
           )
-        }
-        .toMat(BroadcastHub.sink[Scan])(Keep.both)
-        .run()(materializer) // Explicitly pass the materializer
+          
+          val (actorRef, source) = actorSource
+            .collect(collector)
+            .toMat(BroadcastHub.sink[Any])(Keep.both)
+            .run()(materializer)
+          
+          name -> (actorRef, source)
+      }.toMap
+
 
       val routerActor = ctx.actorOf(
         PropsAdapter[StreamToActorMessage[FlowMessage]](
-          RouterActor(grpcActorRef)
+          RouterActor(sourceActorRefs)
         ),
         "routerActor"
       )

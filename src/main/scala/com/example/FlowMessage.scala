@@ -33,6 +33,28 @@ object FlowMessage {
       field.set(this, Scan.parseFrom(bytes))
     }
   }
+
+  @SerialVersionUID(1L)
+  case class PoseInvocation(msg: Pose) extends FlowMessage {
+    // Override serialization methods to handle protobuf properly
+    private def writeObject(out: java.io.ObjectOutputStream): Unit = {
+      out.defaultWriteObject()
+      val bytes = msg.toByteArray
+      out.writeInt(bytes.length)
+      out.write(bytes)
+    }
+    
+    private def readObject(in: java.io.ObjectInputStream): Unit = {
+      in.defaultReadObject()
+      val length = in.readInt()
+      val bytes = new Array[Byte](length)
+      in.readFully(bytes)
+      // Use reflection to set the msg field since it's immutable
+      val field = this.getClass.getDeclaredField("msg")
+      field.setAccessible(true)
+      field.set(this, Pose.parseFrom(bytes))
+    }
+  }
   
   // The ServiceKey for router registration
   val RouterKey: ServiceKey[StreamToActorMessage[FlowMessage]] = 

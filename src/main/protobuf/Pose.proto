@@ -1,0 +1,19 @@
+/**
+ * Scan message compatible with sensor_msgs/LaserScan Ros v1
+ */
+
+syntax = "proto3";
+option java_package = "com.example.proto";
+option java_outer_classname = "PoseProto";
+
+import "google/protobuf/empty.proto";
+
+message Pose {
+  float x = 1;
+  float y = 2;
+  repeated float orientation = 3;
+}
+
+service PoseService {
+  rpc getPoseStream(google.protobuf.Empty) returns (stream Pose) {}
+}

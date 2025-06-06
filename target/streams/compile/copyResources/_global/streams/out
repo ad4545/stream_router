@@ -1,4 +1,5 @@
 [0m[[0m[0mdebug[0m] [0m[0mCopy resource mappings: [0m
+[0m[[0m[0mdebug[0m] [0m[0m	(/home/ubuntu/stream_router/src/main/protobuf/Pose.proto,/home/ubuntu/stream_router/target/scala-3.4.2/classes/Pose.proto)[0m
 [0m[[0m[0mdebug[0m] [0m[0m	(/home/ubuntu/stream_router/src/main/protobuf/Scan.proto,/home/ubuntu/stream_router/target/scala-3.4.2/classes/Scan.proto)[0m
 [0m[[0m[0mdebug[0m] [0m[0m	(/home/ubuntu/stream_router/src/main/resources/application.conf,/home/ubuntu/stream_router/target/scala-3.4.2/classes/application.conf)[0m
 [0m[[0m[0mdebug[0m] [0m[0m	(/home/ubuntu/stream_router/src/main/resources/logback.xml,/home/ubuntu/stream_router/target/scala-3.4.2/classes/logback.xml)[0m
