@@ -1,6 +1,0 @@
-[0m[[0m[0minfo[0m] [0m[0mGenerating Akka gRPC service interface for com.example.proto.PoseService[0m
-[0m[[0m[0minfo[0m] [0m[0mGenerating Akka gRPC service interface for com.example.proto.ScanService[0m
-[0m[[0m[0minfo[0m] [0m[0mGenerating Akka gRPC client for com.example.proto.PoseService[0m
-[0m[[0m[0minfo[0m] [0m[0mGenerating Akka gRPC client for com.example.proto.ScanService[0m
-[0m[[0m[0minfo[0m] [0m[0mGenerating Akka gRPC service handler for com.example.proto.PoseService[0m
-[0m[[0m[0minfo[0m] [0m[0mGenerating Akka gRPC service handler for com.example.proto.ScanService[0m

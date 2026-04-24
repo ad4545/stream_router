@@ -1,0 +1,28 @@
+syntax = "proto3";
+package com.example.grpc;
+
+// Client requests a stream filtered by topic name
+message TopicStreamRequest {
+  string topic = 1;   // e.g. "sensor-scan", "sensor-pose"
+}
+
+// Each chunk is a raw Kafka record — client deserializes with their own .proto
+message RawDataChunk {
+  string topic = 1;
+  string key = 2;
+  bytes payload = 3;  // Opaque serialized bytes
+}
+
+message ListTopicsRequest {}
+
+message TopicList {
+  repeated string topics = 1;
+}
+
+service StreamRouter {
+  // Server-streaming: subscribe to a specific topic's data
+  rpc SubscribeToTopic (TopicStreamRequest) returns (stream RawDataChunk);
+  
+  // Unary: list currently known topics
+  rpc ListTopics (ListTopicsRequest) returns (TopicList);
+}

@@ -1,69 +1,107 @@
 package com.example
 
-import akka.actor.typed.ActorRef
-import akka.actor.typed.Behavior
-import akka.actor.typed.scaladsl.Behaviors
-import akka.stream.scaladsl.Source
+import org.apache.pekko.actor.typed.{ ActorRef, Behavior, Terminated }
+import org.apache.pekko.actor.typed.scaladsl.Behaviors
+import org.apache.pekko.actor.typed.receptionist.Receptionist
 import com.example.StreamToActorMessaging._
 import com.example.FlowMessage._
+import com.typesafe.scalalogging.LazyLogging
 
-object RouterActor {
-  var counter: Int = 0
+import scala.collection.mutable
 
-  def apply(
-    sourceActorRefs: Map[String, (ActorRef[FlowMessage], Source[Any, _])]
-  ): Behavior[StreamToActorMessage[FlowMessage]] =
+/**
+ * Ingestion gateway actor — the single Receptionist entry point for stream_handler.
+ *
+ * Registered under `RouterKey` (matching the stream_handler's existing send target).
+ *
+ * Responsibilities:
+ *  - Accept `StreamToActorMessage[FlowMessage]` from stream_handler subscribers.
+ *  - On first message for an unseen topic, spawn a child `TopicActor`, register it
+ *    under `topicHubKey(topic)`, and record it in `topicActors`.
+ *  - Forward each `RawMessage` to the correct `TopicActor` via `Publish`.
+ *  - Watch each child and remove it from `topicActors` on `Terminated` so it can
+ *    be transparently re-created on the next message for that topic.
+ *  - Maintain `knownTopics` for the `ListTopics` gRPC call.
+ */
+object RouterActor extends LazyLogging {
+
+  /** Shared topic registry — written by RouterActor, read by GrpcStreamService. */
+  val knownTopics: java.util.Set[String] =
+    java.util.concurrent.ConcurrentHashMap.newKeySet[String]()
+
+  def apply(): Behavior[Any] =
     Behaviors.setup { context =>
-      println(s"[RouterActor] Starting with sourceActorRef: $sourceActorRefs")
-      
-      Behaviors.receiveMessage[StreamToActorMessage[FlowMessage]] {
-        case StreamInit(replyTo) =>
-          println(s"[RouterActor] Received StreamInit from: $replyTo")
-          println("[RouterActor] Signaling demand by responding with Ack")
-          replyTo ! StreamAck
-          Behaviors.same
 
-        case StreamElementIn(element, replyTo) =>
-          counter += 1
-          println(s"[RouterActor] Received StreamElementIn #$counter")
-          println(s"[RouterActor] Element type: ${element.getClass}")
-          println(s"[RouterActor] Element value: $element")
-          
-          // Handle the element safely without casting
-          element match {
-            case scanInvocation: Invocation =>
-              println(s"[RouterActor] Processing Invocation---------: $scanInvocation")
-              // Forward to the source actor if needed
-              val scanRef = sourceActorRefs("scan")._1
-              scanRef ! scanInvocation
+      // Mutable registry: topic → dedicated TopicActor ref
+      val topicActors: mutable.Map[String, ActorRef[TopicHubCommand]] = mutable.Map.empty
 
-            case poseInvocation: PoseInvocation =>
-              println(s"[RouterActor] Processing PoseInvocation------: $poseInvocation")
-              // Forward to the source actor if needed
-              val scanRef = sourceActorRefs("pose")._1
-              scanRef ! poseInvocation  
-              
-            case other =>
-              println(s"[RouterActor] Processing other FlowMessage type: ${other.getClass.getSimpleName}")
-              // Handle other FlowMessage types
+      var messageCounter: Long = 0L
+
+      logger.info("[RouterActor] Initialized. Waiting for ingestion messages.")
+
+      Behaviors.receive[Any] { (ctx, msg) =>
+        msg match {
+
+          // ── Ingestion protocol ────────────────────────────────────────────
+          case StreamInit(replyTo) =>
+            val replyToTyped = replyTo.asInstanceOf[ActorRef[StreamToActorMessage[FlowMessage]]]
+            logger.info(s"[RouterActor] StreamInit from ${replyToTyped.path}")
+            replyToTyped ! StreamAck
+            Behaviors.same
+
+          case StreamElementIn(element, replyTo) =>
+            val elementTyped = element.asInstanceOf[FlowMessage]
+            val replyToTyped = replyTo.asInstanceOf[ActorRef[StreamToActorMessage[FlowMessage]]]
+            messageCounter += 1
+            try {
+              elementTyped match {
+                case raw: RawMessage =>
+                  val topic = raw.topic
+
+                  // ── Lazy TopicActor spawning ──────────────────────────────
+                  val topicRef = topicActors.getOrElseUpdate(topic, {
+                    logger.info(s"[RouterActor] First message for topic '$topic' — spawning TopicActor.")
+                    val child = ctx.spawn(TopicActor(topic), s"topic-$topic")
+                    ctx.watch(child)   // detect crashes
+                    ctx.system.receptionist ! Receptionist.Register(topicHubKey(topic), child)
+                    knownTopics.add(topic)
+                    child
+                  })
+
+                  topicRef ! Publish(raw)
+
+                  if (messageCounter % 500 == 0)
+                    logger.info(s"[RouterActor] Forwarded $messageCounter messages across ${topicActors.size} topic(s).")
+
+                case other =>
+                  logger.warn(s"[RouterActor] Unexpected FlowMessage subtype: ${other.getClass.getSimpleName}")
+              }
+              replyTo ! StreamAck
+            } catch {
+              case ex: Exception =>
+                logger.error(s"[RouterActor] Error dispatching message: ${ex.getMessage}", ex)
+                replyTo ! StreamFailed(ex.getMessage)
+            }
+            Behaviors.same
+
+          case StreamFailed(cause) =>
+            logger.error(s"[RouterActor] Input stream failed: $cause")
+            Behaviors.stopped
+
+          case StreamCompleted =>
+            logger.info("[RouterActor] Input stream completed.")
+            Behaviors.stopped
+
+          case other =>
+            logger.warn(s"[RouterActor] Unexpected message type: ${other.getClass.getName}")
+            Behaviors.same
+        }
+      }.receiveSignal {
+        case (ctx, Terminated(ref)) =>
+          topicActors.find { case (_, v) => v == ref }.foreach { case (topic, _) =>
+            logger.warn(s"[RouterActor] TopicActor for '$topic' terminated — removing from registry.")
+            topicActors.remove(topic)
           }
-          
-          println(s"[RouterActor] Sending StreamAck to: $replyTo")
-          replyTo ! StreamAck
-          Behaviors.same
-
-        case StreamFailed(throwable) =>
-          println(s"[RouterActor] Received StreamFailed: $throwable")
-          println("[RouterActor] Will cleanup and stop")
-          throwable.printStackTrace()
-          Behaviors.stopped
-
-        case StreamCompleted =>
-          println("[RouterActor] Received StreamCompleted, will cleanup and stop")
-          Behaviors.stopped
-          
-        case other =>
-          println(s"[RouterActor] Received unexpected message: $other")
           Behaviors.same
       }
     }
