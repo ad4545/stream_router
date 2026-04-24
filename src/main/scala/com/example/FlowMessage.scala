@@ -8,8 +8,8 @@ import StreamToActorMessaging._
 
 object FlowMessage {
 
-  @SerialVersionUID(1L)
-   trait FlowMessage extends CborSerializable
+  @com.fasterxml.jackson.annotation.JsonTypeInfo(use = com.fasterxml.jackson.annotation.JsonTypeInfo.Id.CLASS, property = "type")
+  trait FlowMessage extends CborSerializable
 
   // ── Raw Kafka message — no parsing done here ──────────────────────────────
   // The downstream Router/service is responsible for interpreting the bytes.

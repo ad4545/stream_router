@@ -32,9 +32,13 @@ object RouterNode extends LazyLogging {
 
         // ── Spawn a single RouterActor and register under the shared RouterKey ──
         // stream_handler nodes discover this actor via the Receptionist.
-        val routerActor = ctx.spawn(RouterActor(), "routerActor")
+        // Added supervision to ensure the gateway restarts on unexpected failures.
+        val routerActor = ctx.spawn(
+          Behaviors.supervise(RouterActor()).onFailure[Throwable](SupervisorStrategy.restart),
+          "routerActor"
+        )
         ctx.system.receptionist ! Receptionist.Register(RouterKey, routerActor)
-        logger.info("[RouterNode] RouterActor spawned and registered under RouterKey.")
+        logger.info("[RouterNode] RouterActor spawned with supervision and registered under RouterKey.")
 
         // ── Start gRPC Server ────────────────────────────────────────────────
         val grpcPort    = config.getInt("grpc.port")

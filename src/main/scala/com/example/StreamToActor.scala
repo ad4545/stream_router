@@ -4,7 +4,7 @@ import org.apache.pekko.actor.typed.ActorRef
 
 object StreamToActorMessaging {
 
-  @SerialVersionUID(1L)
+  @com.fasterxml.jackson.annotation.JsonTypeInfo(use = com.fasterxml.jackson.annotation.JsonTypeInfo.Id.CLASS, property = "type")
   sealed trait StreamToActorMessage[+T] extends CborSerializable
 
   @SerialVersionUID(1L)
@@ -26,17 +26,20 @@ object StreamToActorMessaging {
 
   @SerialVersionUID(1L)
   case class StreamElementIn[T](
+    @com.fasterxml.jackson.annotation.JsonTypeInfo(use = com.fasterxml.jackson.annotation.JsonTypeInfo.Id.CLASS, property = "type")
     in: T,
     replyTo: ActorRef[StreamToActorMessage[T]]
   ) extends StreamToActorMessage[T]
 
   @SerialVersionUID(1L)
   case class StreamElementOut[T](
+    @com.fasterxml.jackson.annotation.JsonTypeInfo(use = com.fasterxml.jackson.annotation.JsonTypeInfo.Id.CLASS, property = "type")
     msg: T
   ) extends StreamToActorMessage[T]
 
   @SerialVersionUID(1L)
   case class StreamElementOutWithAck[T](
+    @com.fasterxml.jackson.annotation.JsonTypeInfo(use = com.fasterxml.jackson.annotation.JsonTypeInfo.Id.CLASS, property = "type")
     msg: T
   ) extends StreamToActorMessage[T]
 

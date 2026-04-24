@@ -1,0 +1,69 @@
+syntax = "proto3";
+
+// Combined Proto file for ROS Odometry
+// This includes nav_msgs/Odometry and all its recursive dependencies
+
+import "google/protobuf/timestamp.proto";
+
+package combined_odom;
+
+// --- std_msgs/Header ---
+message Header {
+  uint32 Seq = 1;
+  google.protobuf.Timestamp Stamp = 2;
+  string FrameId = 3;
+}
+
+// --- geometry_msgs/Point ---
+message Point {
+  double X = 1;
+  double Y = 2;
+  double Z = 3;
+}
+
+// --- geometry_msgs/Quaternion ---
+message Quaternion {
+  double X = 1;
+  double Y = 2;
+  double Z = 3;
+  double W = 4;
+}
+
+// --- geometry_msgs/Vector3 ---
+message Vector3 {
+  double X = 1;
+  double Y = 2;
+  double Z = 3;
+}
+
+// --- geometry_msgs/Pose ---
+message Pose {
+  Point Position = 1;
+  Quaternion Orientation = 2;
+}
+
+// --- geometry_msgs/PoseWithCovariance ---
+message PoseWithCovariance {
+  Pose Pose = 1;
+  repeated double Covariance = 2; // 36 elements
+}
+
+// --- geometry_msgs/Twist ---
+message Twist {
+  Vector3 Linear = 1;
+  Vector3 Angular = 2;
+}
+
+// --- geometry_msgs/TwistWithCovariance ---
+message TwistWithCovariance {
+  Twist Twist = 1;
+  repeated double Covariance = 2; // 36 elements
+}
+
+// --- nav_msgs/Odometry (Main Message for /odom_with_amcl) ---
+message Odometry {
+  Header Header = 1;
+  string ChildFrameId = 2;
+  PoseWithCovariance Pose = 3;
+  TwistWithCovariance Twist = 4;
+}

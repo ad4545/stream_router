@@ -1,0 +1,15 @@
+{
+  "name": "test-grpc-client",
+  "version": "1.0.0",
+  "description": "Sample gRPC client for the Stream Router — reference implementation for microservice integration",
+  "type": "module",
+  "scripts": {
+    "client": "node src/client.mjs",
+    "list-topics": "node src/list-topics.mjs",
+    "subscribe": "node src/subscribe-topic.mjs"
+  },
+  "dependencies": {
+    "@grpc/grpc-js": "^1.12.6",
+    "@grpc/proto-loader": "^0.7.13"
+  }
+}

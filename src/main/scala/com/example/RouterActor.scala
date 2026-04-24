@@ -29,7 +29,7 @@ object RouterActor extends LazyLogging {
   val knownTopics: java.util.Set[String] =
     java.util.concurrent.ConcurrentHashMap.newKeySet[String]()
 
-  def apply(): Behavior[Any] =
+  def apply(): Behavior[StreamToActorMessage[FlowMessage]] =
     Behaviors.setup { context =>
 
       // Mutable registry: topic → dedicated TopicActor ref
@@ -39,31 +39,28 @@ object RouterActor extends LazyLogging {
 
       logger.info("[RouterActor] Initialized. Waiting for ingestion messages.")
 
-      Behaviors.receive[Any] { (ctx, msg) =>
-        msg match {
+      Behaviors.receiveMessage[StreamToActorMessage[FlowMessage]] { msg =>
+        try {
+          msg match {
 
-          // ── Ingestion protocol ────────────────────────────────────────────
-          case StreamInit(replyTo) =>
-            val replyToTyped = replyTo.asInstanceOf[ActorRef[StreamToActorMessage[FlowMessage]]]
-            logger.info(s"[RouterActor] StreamInit from ${replyToTyped.path}")
-            replyToTyped ! StreamAck
-            Behaviors.same
+            // ── Ingestion protocol ────────────────────────────────────────────
+            case StreamInit(replyTo) =>
+              logger.info(s"[RouterActor] StreamInit from ${replyTo.path}")
+              replyTo ! StreamAck
+              Behaviors.same
 
-          case StreamElementIn(element, replyTo) =>
-            val elementTyped = element.asInstanceOf[FlowMessage]
-            val replyToTyped = replyTo.asInstanceOf[ActorRef[StreamToActorMessage[FlowMessage]]]
-            messageCounter += 1
-            try {
-              elementTyped match {
+            case StreamElementIn(element, replyTo) =>
+              messageCounter += 1
+              element match {
                 case raw: RawMessage =>
                   val topic = raw.topic
 
                   // ── Lazy TopicActor spawning ──────────────────────────────
                   val topicRef = topicActors.getOrElseUpdate(topic, {
                     logger.info(s"[RouterActor] First message for topic '$topic' — spawning TopicActor.")
-                    val child = ctx.spawn(TopicActor(topic), s"topic-$topic")
-                    ctx.watch(child)   // detect crashes
-                    ctx.system.receptionist ! Receptionist.Register(topicHubKey(topic), child)
+                    val child = context.spawn(TopicActor(topic), s"topic-$topic")
+                    context.watch(child) // detect crashes
+                    context.system.receptionist ! Receptionist.Register(topicHubKey(topic), child)
                     knownTopics.add(topic)
                     child
                   })
@@ -77,24 +74,24 @@ object RouterActor extends LazyLogging {
                   logger.warn(s"[RouterActor] Unexpected FlowMessage subtype: ${other.getClass.getSimpleName}")
               }
               replyTo ! StreamAck
-            } catch {
-              case ex: Exception =>
-                logger.error(s"[RouterActor] Error dispatching message: ${ex.getMessage}", ex)
-                replyTo ! StreamFailed(ex.getMessage)
-            }
-            Behaviors.same
+              Behaviors.same
 
-          case StreamFailed(cause) =>
-            logger.error(s"[RouterActor] Input stream failed: $cause")
-            Behaviors.stopped
+            case StreamFailed(cause) =>
+              logger.error(s"[RouterActor] Input stream failed: $cause")
+              Behaviors.same
 
-          case StreamCompleted =>
-            logger.info("[RouterActor] Input stream completed.")
-            Behaviors.stopped
+            case StreamCompleted =>
+              logger.info("[RouterActor] Input stream completed.")
+              Behaviors.same
 
-          case other =>
-            logger.warn(s"[RouterActor] Unexpected message type: ${other.getClass.getName}")
-            Behaviors.same
+            case _ =>
+              Behaviors.same
+          }
+        } catch {
+          case ex: Throwable =>
+            logger.error(s"[RouterActor] Fatal error in processing: ${ex.getMessage}", ex)
+            // Rethrow so supervision can catch it and restart the actor
+            throw ex
         }
       }.receiveSignal {
         case (ctx, Terminated(ref)) =>
