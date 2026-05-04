@@ -63,118 +63,92 @@ function listTopics() {
 }
 
 // -----------------------------------------------------------------------------
-// 4. Step 2 & 3: Subscribe and Deserialize
+// 4. Subscribe and Deserialize function
 // -----------------------------------------------------------------------------
-function subscribeAndDeserialize(topicName) {
+function subscribeToTopic(client, topicName, OdometryMessage) {
   console.log(`\n[Client] Subscribing to stream: ${topicName}`);
-  
-  // Create a server-streaming request
   const stream = client.SubscribeToTopic({ topic: topicName });
   
   let messageCount = 0;
 
-  // Handle incoming data chunks
   stream.on('data', (chunk) => {
     messageCount++;
-    
-    // The `chunk` is a `RawDataChunk` containing:
-    // - topic (string)
-    // - key (string)
-    // - payload (Buffer - opaque bytes)
-    
-    // We know that topic amr.001.odom_with_amcl contains `combined_odom.Odometry` messages.
-    // So we use the Odometry message type to deserialize the opaque payload Buffer.
-    
     try {
-      // In @grpc/grpc-js + protoLoader, we can use the type definition's decode method
-      // Actually, since we loaded it using grpc.loadPackageDefinition, the returned object 
-      // doesn't expose the decode method directly easily for dynamic Buffers if we don't use the underlying protobufjs root.
-      // Let's use the underlying protobufjs root that @grpc/proto-loader created.
-      // However, @grpc/proto-loader is primarily for service definitions. 
-      // Let's use the service definition's fileDescriptorProtos to decode, OR 
-      // even better, since we are doing dynamic decoding, we can use protobuf.js directly.
-      // Wait, @grpc/proto-loader *does* use protobufjs. But let's show a cleaner way.
-      // 
-      // Actually, since we use @grpc/proto-loader, we can access the type.
-      // A cleaner way for domain objects is to use protobufjs root directly, 
-      // but let's see if we can do it with just protoLoader.
-      // The grpc.loadPackageDefinition output has the type but no direct `decode` function.
-      // We will parse it manually via the package definition.
+      // chunk.payload is a Buffer containing the serialized Odometry message
+      const decoded = OdometryMessage.decode(chunk.payload);
+      const obj = OdometryMessage.toObject(decoded, {
+        longs: String,
+        enums: String,
+        bytes: String,
+        defaults: true, // Forces protobufjs to include fields that are 0
+      });
+      
+      console.log(`\n--- Received Message #${messageCount} on ${chunk.topic} ---`);
+      
+      // The properties match the .proto exactly (PascalCase). 
+      // If a value is 0, protobuf3 omits it, but `defaults: true` fixes that.
+      const stamp = obj.Header?.Stamp?.seconds || 'N/A';
+      const x = obj.Pose?.Pose?.Position?.X ?? 0;
+      const y = obj.Pose?.Pose?.Position?.Y ?? 0;
+      const w = obj.Pose?.Pose?.Orientation?.W ?? 0;
+
+      console.log(`Timestamp: ${stamp}`);
+      console.log(`Position:  X=${x.toFixed(3)} Y=${y.toFixed(3)}`);
+      console.log(`Orientation: W=${w.toFixed(3)}`);
+      
     } catch (err) {
-       console.error(`[Error] Failed to deserialize payload:`, err);
+       console.error(`[Error on ${topicName}] Failed to deserialize payload:`, err);
     }
   });
 
   stream.on('error', (err) => {
-    console.error(`\n[Error] Stream error:`, err.message);
-    if (err.code === grpc.status.NOT_FOUND) {
-        console.error(`Hint: The topic '${topicName}' might not be active yet.`);
-    }
+    console.error(`\n[Error on ${topicName}] Stream error:`, err.message);
   });
 
   stream.on('end', () => {
-    console.log(`\n[Client] Stream ended by server.`);
+    console.log(`\n[Client] Stream ended by server for topic: ${topicName}`);
   });
 }
 
-// Let's fix the deserialization. Since @grpc/proto-loader hides the protobuf.js `decode` method,
-// it's best to use `protobufjs` directly for decoding domain payloads in Node.js.
-// Let's do that cleanly.
+// -----------------------------------------------------------------------------
+// 5. Main Execution
+// -----------------------------------------------------------------------------
 import protobuf from 'protobufjs';
 
 async function main() {
   try {
-    // 1. List topics
-    const topics = await listTopics();
+    // 1. List topics available on the server
+    const availableTopics = await listTopics();
     
     // 2. Load domain proto with protobufjs for decoding payloads
     const root = await protobuf.load(ODOMETRY_PROTO_PATH);
     const OdometryMessage = root.lookupType("combined_odom.Odometry");
 
-    const TARGET_TOPIC = 'amr.001.odom_with_amcl';
-    
-    if (!topics.includes(TARGET_TOPIC)) {
-      console.warn(`\n[Warning] Topic '${TARGET_TOPIC}' is not currently active.`);
-      console.log(`We will try subscribing anyway (it will retry until the stream appears).`);
+    // 3. User-defined list of topics they WANT to subscribe to
+    const requestedTopics = [
+      'amr.001.odom_with_amcl',
+      'amr.002.odom_with_amcl',
+      'amr.003.odom_with_amcl'
+    ];
+
+    console.log(`\n[Client] User requested topics:`);
+    requestedTopics.forEach(t => console.log(`  - ${t}`));
+
+    // 4. Filter requested topics against available active topics
+    const topicsToSubscribe = requestedTopics.filter(topic => availableTopics.includes(topic));
+
+    if (topicsToSubscribe.length === 0) {
+      console.warn(`\n[Warning] None of the requested topics are currently active on the server.`);
+      console.log(`Client shutting down...`);
+      return;
     }
 
-    // 3. Subscribe
-    console.log(`\n[Client] Subscribing to stream: ${TARGET_TOPIC}`);
-    const stream = client.SubscribeToTopic({ topic: TARGET_TOPIC });
-    
-    let messageCount = 0;
+    console.log(`\n[Client] Matched ${topicsToSubscribe.length} active topics. Initiating subscriptions...`);
 
-    stream.on('data', (chunk) => {
-      messageCount++;
-      
-      try {
-        // chunk.payload is a Buffer containing the serialized Odometry message
-        const decoded = OdometryMessage.decode(chunk.payload);
-        
-        // Convert to a plain JS object for easy printing
-        const obj = OdometryMessage.toObject(decoded, {
-          longs: String,
-          enums: String,
-          bytes: String,
-        });
-        
-        console.log(`\n--- Received Message #${messageCount} on ${chunk.topic} ---`);
-        console.log(`Timestamp: ${obj.Header?.Stamp?.seconds || 'N/A'}`);
-        console.log(`Position:  X=${obj.Pose?.Pose?.Position?.X?.toFixed(3)} Y=${obj.Pose?.Pose?.Position?.Y?.toFixed(3)}`);
-        console.log(`Orientation: W=${obj.Pose?.Pose?.Orientation?.W?.toFixed(3)}`);
-        
-      } catch (err) {
-         console.error(`[Error] Failed to deserialize payload:`, err);
-      }
-    });
-
-    stream.on('error', (err) => {
-      console.error(`\n[Error] Stream error:`, err.message);
-    });
-
-    stream.on('end', () => {
-      console.log(`\n[Client] Stream ended by server.`);
-    });
+    // 5. Subscribe to each matched topic
+    for (const topic of topicsToSubscribe) {
+      subscribeToTopic(client, topic, OdometryMessage);
+    }
 
   } catch (err) {
     console.error("Fatal error:", err);

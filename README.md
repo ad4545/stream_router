@@ -95,9 +95,11 @@ It provides a complexity-free gRPC endpoint for microservices to attach to live,
 | `pekko.remote.artery.advanced.maximum-frame-size` | `256000b` | ~250 KB max inter-node message |
 | `pekko.cluster.downing-provider-class` | `SplitBrainResolverProvider` | `keep-majority` strategy, stable after 20s |
 | `grpc.port` | `8080` | gRPC server listen port |
-| `stream-router.topic-actor-buffer-size` | `1024` | `BroadcastHub` ring-buffer depth per topic |
+| `stream-router.topic-actor-buffer-size` | `1024` | `Source.queue` capacity and `BroadcastHub` ring-buffer depth per topic |
 | `stream-router.grpc-topic-lookup-timeout` | `5s` | Receptionist ask timeout |
 | `stream-router.grpc-topic-retry-backoff-max` | `4` | Max exponential backoff retries |
+| `stream-router.topic-actor-mailbox.mailbox-capacity` | `1024` | Bounded mailbox depth for each `TopicActor`; overflow → dead letters |
+| `stream-router.topic-actor-mailbox.mailbox-push-timeout-time` | `0s` | Non-blocking drop — `RouterActor` is never stalled by a full mailbox |
 
 ---
 
@@ -108,9 +110,10 @@ It provides a complexity-free gRPC endpoint for microservices to attach to live,
 - **Receptionist Discovery**: Registers itself under `RouterKey`. Upstream `Stream Handler` nodes resolve this key dynamically and never need to know the router's IP.
 - **Dynamic Laziness**: The router does not need to know topics in advance. When it receives a `StreamElementIn[RawMessage]`, it checks its internal mutable `Map[String, ActorRef[TopicHubCommand]]`. If no actor exists for that topic, it lazily spawns one.
 - **Lifecycle Watching**: After spawning a `TopicActor`, it calls `ctx.watch(child)`. If the child terminates (crash or explicit stop), the `Terminated` signal removes the entry from the registry, so the next incoming message transparently re-creates the actor.
-- **Global Knowledge**: Each newly discovered topic name is added to a thread-safe `ConcurrentHashMap.KeySet` (`RouterActor.knownTopics`). The gRPC layer reads this set lock-free when serving `ListTopics` requests.
+- **Global Knowledge**: Each newly discovered topic name is added to a thread-safe `ConcurrentHashMap.KeySet` (`RouterActor.knownTopics`). The gRPC layer reads this set lock-free when serving `ListTopics` requests. When a `TopicActor` terminates, its topic is removed from the set in the same `Terminated` handler that clears `topicActors`, keeping the two data structures in sync.
+- **Concurrency contract**: `RouterActor` is the sole writer of `knownTopics` (both add and remove execute inside the actor's single-threaded mailbox). `ConcurrentHashMap.KeySet` is safe for concurrent reads. A residual sub-millisecond race exists between the Receptionist deregistration of a terminating `TopicActor` and the processing of its `Terminated` signal: in that window `ListTopics` may still return the topic name, and a subsequent `SubscribeToTopic` will hit the exponential-backoff retry path before either succeeding (transient restart) or returning `NOT_FOUND` (genuine termination). No corrective action is taken in the hot path; the backoff absorbs it gracefully.
 - **Backpressure Protocol**: For every `StreamElementIn`, the router replies with `StreamAck` after forwarding. This is the demand signal that prevents the network from being flooded faster than the actor can process.
-- **Diagnostic Logging**: Every 500 forwarded messages, the router logs a throughput summary (`[RouterActor] Forwarded N messages across M topic(s).`).
+- **Diagnostic Logging**: Every 500 forwarded messages, the router logs a throughput summary (`[RouterActor] Forwarded N messages across M topic(s).`). On `Terminated`, the router logs the removal of the topic actor and its corresponding entry from `knownTopics`.
 
 #### Message Protocol (`StreamToActorMessaging.scala`)
 
@@ -149,35 +152,44 @@ Each Kafka topic first seen by the `RouterActor` gets its own dedicated `TopicAc
 On actor initialization, `TopicActor` wires and materializes a permanent internal stream:
 
 ```
-  producers ──▶ MergeHub ──▶ BroadcastHub ──▶ N gRPC subscribers
+  producers ──▶ Source.queue ──▶ BroadcastHub ──▶ N gRPC subscribers
 ```
 
-Crucially, this pipeline is materialized immediately inside `Behaviors.setup`. The "pipes" are open and pulling even before any gRPC client has subscribed. This preserves the healthy steady-state of the upstream Kafka consumers — the flow never backs up.
+The pipeline is materialized immediately inside `Behaviors.setup`. Streams are open and pulling even before any gRPC client has subscribed, keeping upstream Kafka consumers draining at a steady pace.
 
 ```scala
-val (mergeSink, hubSource) =
-  MergeHub.source[RawMessage](perProducerBufferSize = 16)
-    .toMat(BroadcastHub.sink[RawMessage](bufferSize = bufferSize))(Keep.both)
+val (queue, hubSource) =
+  Source.queue[RawMessage](bufferSize = 1, OverflowStrategy.dropHead)
+    .toMat(BroadcastHub.sink[RawMessage](bufferSize = 2))(Keep.both)
     .run()
 ```
 
-#### MergeHub (Fan-In)
+#### Bounded Actor Mailbox (Flow-Control)
 
-Provides a dynamic "funnel" that accepts concurrent `Source.single(msg).runWith(mergeSink)` calls from the `RouterActor`. Each `Publish` command creates an independent stream materialization — thread-safe by design, no locking required.
+RouterActor sends `StreamAck` back to the stream handler immediately after forwarding `Publish` — it does **not** wait for TopicActor to consume the message. Without a bound, the TopicActor mailbox can grow without limit when ingest outpaces consumption (e.g. zero gRPC subscribers).
+
+Every TopicActor child is therefore spawned with a **bounded mailbox** (`stream-router.topic-actor-mailbox`, capacity = `topic-actor-buffer-size`, push-timeout = 0 s):
+
+- When the mailbox is full, excess `Publish` messages are dropped to **dead letters** by the Pekko dispatcher before reaching the actor. RouterActor is never blocked.
+- Dead-letter logging (`pekko.log-dead-letters`) gives operators early visibility of sustained overload.
+
+#### Source.queue (Inner Drop Boundary)
+
+`Source.queue` with `OverflowStrategy.dropHead` (capacity = 1) is a second drop point *inside* the actor — it sheds the oldest buffered message when the BroadcastHub is busy. The `queue.offer` result Future is pattern-matched explicitly; every drop logs at **WARN** rather than being silently discarded.
 
 #### BroadcastHub (Fan-Out)
 
-Acts as a dynamic "splitter". It takes the unified stream and provides a reusable `hubSource` that is shared among all gRPC subscribers.
+Acts as a dynamic splitter. It takes the unified stream and provides a reusable `hubSource` shared among all gRPC subscribers.
 
-- Every time a new gRPC client subscribes, they materialize this `Source`, receiving their own **independent cursor** into the rolling ring-buffer.
-- **Isolation**: A slow network client that cannot consume fast enough has its buffer dropped locally (ring-buffer overflow). The global ingestion flow is never blocked.
+- Every new gRPC client materializes `hubSource` independently, receiving its own cursor into the ring-buffer.
+- **Isolation**: A slow network client that cannot consume fast enough has its buffer dropped locally. The global ingestion flow is never blocked.
 - **Buffer depth** is controlled by `stream-router.topic-actor-buffer-size` (default: `1024` elements).
 
 #### TopicActor Commands
 
 | Command | Sender | Action |
 |---|---|---|
-| `Publish(msg: RawMessage)` | `RouterActor` | Pushes one message into the `MergeHub` |
+| `Publish(msg: RawMessage)` | `RouterActor` | Offers one message to the `Source.queue` |
 | `Subscribe(replyTo)` | `GrpcStreamService` | Returns the shared `hubSource` reference |
 
 ---
@@ -228,7 +240,9 @@ hubSource.map { raw =>
 
 #### `ListTopics` (unary RPC)
 
-Reads `RouterActor.knownTopics` — a `ConcurrentHashMap.KeySet` — directly from any thread. No actor messaging is required because the set is written only by `RouterActor` (a single writer) and is safe for concurrent readers. Returns a sorted `TopicList`.
+Reads `RouterActor.knownTopics` — a `ConcurrentHashMap.KeySet` — directly from any thread. The set is written only by `RouterActor`: topics are added on first-seen and removed when the corresponding `TopicActor` terminates (`Terminated` signal), both in the actor's single-threaded mailbox. Returns a sorted `TopicList`.
+
+> **Residual race**: in the sub-millisecond window between a `TopicActor` being deregistered from the Receptionist and its `Terminated` signal being delivered to `RouterActor`, `ListTopics` may still return the topic name. A `SubscribeToTopic` call for that topic will hit the exponential-backoff retry path and either succeed (transient restart) or return `NOT_FOUND` (genuine termination). The backoff absorbs this gracefully — no silent data loss.
 
 ---
 
@@ -383,8 +397,16 @@ The router is source-agnostic. Any future producer (MQTT bridge, WebSocket relay
 
 The gRPC edge interface, `TopicActor` hubs, and all downstream microservices remain entirely unchanged.
 
-### Tuning the BroadcastHub Buffer
-The `topic-actor-buffer-size` (default: `1024`) controls how many elements each `BroadcastHub` retains for slow subscribers. Increase this on high-throughput topics where subscriber latency variance is expected. Each element is an opaque `Array[Byte]` reference, so memory overhead is proportional to the number of live topics × buffer depth.
+### Tuning the Buffer / Mailbox
+The `topic-actor-buffer-size` (default: `1024`) controls three things:
+
+| Setting | Controlled value |
+|---|---|
+| `Source.queue` capacity inside `TopicActor` | Ring-buffer depth before `dropHead` fires |
+| `BroadcastHub` buffer depth | How many elements slow subscribers can lag behind |
+| `topic-actor-mailbox.mailbox-capacity` | Actor mailbox depth before overflow → dead letters |
+
+All three share the same default (`1024`) so a single config knob covers the full backpressure boundary. Increase on high-throughput topics where subscriber latency variance is expected. Each element is an opaque `Array[Byte]` reference, so memory overhead is proportional to the number of live topics × buffer depth.
 
 ### Logging & Diagnostics
 
@@ -395,6 +417,9 @@ The `topic-actor-buffer-size` (default: `1024`) controls how many elements each 
 | `[RouterActor] First message for topic 'X' — spawning TopicActor` | New data topic discovered; fan-out hub materialized |
 | `[RouterActor] Forwarded N messages across M topic(s)` | Throughput heartbeat every 500 messages |
 | `[TopicActor-X] New subscriber registered` | A gRPC client opened the tap on topic X |
+| `[TopicActor-X] queue.offer dropped a message (dropHead)` | Inner queue overflow — hub buffer full or no active subscribers |
+| `[TopicActor-X] queue.offer rejected: queue closed` | Internal stream shut down unexpectedly; actor should restart |
 | `[RouterActor] TopicActor for 'X' terminated — removing from registry` | TopicActor crash; will be re-created on next inbound message |
+| Dead-letter: `Publish(...)` to `topic-X` | Actor mailbox at capacity; sustained overload — increase `topic-actor-buffer-size` or add subscribers |
 
 > **Integration Detail**: Any microservice implementation connects directly to `localhost:8080` (or the cluster-facing IP). See the `stream_router.proto` contract above for the public API, and the **Stream Handler** documentation to understand how data arrives at this node.

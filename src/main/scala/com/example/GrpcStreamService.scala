@@ -89,8 +89,16 @@ class GrpcStreamService()(
   }
 
   override def listTopics(in: ListTopicsRequest): Future[TopicList] = {
-    // RouterActor.knownTopics is a ConcurrentHashMap.KeySet written on first-seen
-    // topic — safe to read from any thread without actor messaging.
+    // RouterActor.knownTopics is a ConcurrentHashMap.KeySet maintained by the
+    // RouterActor mailbox (add on first-seen, remove on Terminated).  It is safe
+    // to read from any thread without actor messaging.
+    //
+    // Residual race: in the sub-millisecond window between a TopicActor being
+    // deregistered from the Receptionist and the Terminated signal being processed
+    // by RouterActor, a topic may still appear here despite having no active actor.
+    // A subsequent SubscribeToTopic for that topic will hit the exponential-backoff
+    // retry loop and either succeed (transient restart) or return NOT_FOUND (genuine
+    // termination).  No corrective action is taken here; the backoff absorbs it.
     import scala.jdk.CollectionConverters._
     Future.successful(TopicList(topics = RouterActor.knownTopics.asScala.toSeq.sorted))
   }
