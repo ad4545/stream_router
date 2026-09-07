@@ -69,14 +69,23 @@ class GrpcStreamService()(
             // Ask the TopicActor for its BroadcastHub source.
             val sourceF = ref.ask[Source[RawMessage, NotUsed]](Subscribe(_))(lookupTimeout, system.scheduler)
             sourceF.map { hubSource =>
-              hubSource.map { raw =>
-                RawDataChunk(
-                  topic   = raw.topic,
-                  key     = raw.key,
-                  payload = com.google.protobuf.ByteString.copyFrom(raw.value)
-                )
-              }
+              hubSource
+                // When this subscriber's gRPC stream terminates (client disconnect,
+                // error, or clean close), notify the TopicActor so it can decrement
+                // its subscriber count and re-arm the idle timeout if no one is left.
+                .watchTermination() { (_, doneFuture) =>
+                  doneFuture.onComplete(_ => ref ! SubscriberLeft)
+                  NotUsed
+                }
+                .map { raw =>
+                  RawDataChunk(
+                    topic   = raw.topic,
+                    key     = raw.key,
+                    payload = com.google.protobuf.ByteString.copyFrom(raw.value)
+                  )
+                }
             }
+
           case None =>
             Future.failed(Status.NOT_FOUND
               .withDescription(s"Topic '$topic' not yet active. Ensure the producer node is running and restarted with CBOR serialization.")

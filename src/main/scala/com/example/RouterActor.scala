@@ -72,7 +72,6 @@ object RouterActor extends LazyLogging {
       // Mutable registry: topic → dedicated TopicActor ref
       val topicActors: mutable.Map[String, ActorRef[TopicHubCommand]] = mutable.Map.empty
 
-      var messageCounter: Long = 0L
 
       logger.info("[RouterActor] Initialized. Waiting for ingestion messages.")
 
@@ -87,14 +86,13 @@ object RouterActor extends LazyLogging {
               Behaviors.same
 
             case StreamElementIn(element, replyTo) =>
-              messageCounter += 1
               element match {
                 case raw: RawMessage =>
                   val topic = raw.topic
 
                   // ── Lazy TopicActor spawning ──────────────────────────────
                   val topicRef = topicActors.getOrElseUpdate(topic, {
-                    logger.info(s"[RouterActor] First message for topic '$topic' — spawning TopicActor.")
+                    logger.debug(s"[RouterActor] First message for topic '$topic' — spawning TopicActor.")
                     // Spawn with a bounded mailbox so the actor's message queue
                     // cannot grow without limit when ingest outpaces consumption
                     // (e.g. zero gRPC subscribers).  Overflow → dead letters (0s
@@ -109,8 +107,6 @@ object RouterActor extends LazyLogging {
 
                   topicRef ! Publish(raw)
 
-                  if (messageCounter % 500 == 0)
-                    logger.info(s"[RouterActor] Forwarded $messageCounter messages across ${topicActors.size} topic(s).")
 
                 case other =>
                   logger.warn(s"[RouterActor] Unexpected FlowMessage subtype: ${other.getClass.getSimpleName}")

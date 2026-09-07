@@ -35,6 +35,12 @@ object FlowMessage {
   /** Request the shared BroadcastHub source for this topic. */
   case class Subscribe(replyTo: ActorRef[Source[RawMessage, NotUsed]]) extends TopicHubCommand
 
+  /** Internal signal triggered when no messages are received for 15 seconds with no active subscribers. */
+  case object IdleTimeout extends TopicHubCommand
+
+  /** Sent by GrpcStreamService when a subscriber's gRPC stream terminates. */
+  case object SubscriberLeft extends TopicHubCommand
+
   /** ServiceKey factory — unique key per topic string. */
   def topicHubKey(topic: String): ServiceKey[TopicHubCommand] =
     ServiceKey[TopicHubCommand](s"TopicHub-$topic")

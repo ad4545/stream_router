@@ -7,16 +7,22 @@ import com.typesafe.config.ConfigFactory
 import org.apache.pekko.stream.Materializer
 import com.typesafe.scalalogging.LazyLogging
 import org.apache.pekko.http.scaladsl.Http
-import org.apache.pekko.grpc.scaladsl.{ ServerReflection, ServiceHandler }
-import com.example.grpc.{ StreamRouter, StreamRouterHandler }
+import org.apache.pekko.grpc.scaladsl.{ServerReflection, ServiceHandler}
+import com.example.grpc.{StreamRouter, StreamRouterHandler}
 import com.example.FlowMessage._
+
+import scala.concurrent.Await
+import scala.concurrent.duration.Duration
+import scala.util.{Failure, Success}
 
 object RouterNode extends LazyLogging {
 
   def main(args: Array[String]): Unit = {
     val config = ConfigFactory
       .parseString("""
+        pekko.remote.artery.canonical.hostname = "10.0.0.10"
         pekko.remote.artery.canonical.port = 25520
+
         pekko.cluster.seed-nodes = [
           "pekko://ClusterSystem@10.0.0.9:25520",
           "pekko://ClusterSystem@10.0.0.10:25520"
@@ -27,21 +33,24 @@ object RouterNode extends LazyLogging {
     val system = ActorSystem[Nothing](
       Behaviors.setup[Nothing] { ctx =>
         implicit val sys: ActorSystem[?] = ctx.system
-        implicit val ec  = sys.executionContext
-        val materializer: Materializer = Materializer(sys)
+        implicit val ec = sys.executionContext
+        implicit val materializer: Materializer = Materializer(sys)
 
-        // ── Spawn a single RouterActor and register under the shared RouterKey ──
-        // stream_handler nodes discover this actor via the Receptionist.
-        // Added supervision to ensure the gateway restarts on unexpected failures.
+        // Spawn RouterActor and register it under RouterKey
         val routerActor = ctx.spawn(
-          Behaviors.supervise(RouterActor()).onFailure[Throwable](SupervisorStrategy.restart),
+          Behaviors.supervise(RouterActor())
+            .onFailure[Throwable](SupervisorStrategy.restart),
           "routerActor"
         )
-        ctx.system.receptionist ! Receptionist.Register(RouterKey, routerActor)
-        logger.info("[RouterNode] RouterActor spawned with supervision and registered under RouterKey.")
 
-        // ── Start gRPC Server ────────────────────────────────────────────────
-        val grpcPort    = config.getInt("grpc.port")
+        ctx.system.receptionist ! Receptionist.Register(RouterKey, routerActor)
+
+        logger.info(
+          "[RouterNode] RouterActor spawned with supervision and registered under RouterKey."
+        )
+
+        // Start gRPC Server
+        val grpcPort = config.getInt("grpc.port")
         val grpcService = new GrpcStreamService()(sys, materializer, ec)
 
         val grpcHandler = ServiceHandler.concatOrNotFound(
@@ -52,8 +61,13 @@ object RouterNode extends LazyLogging {
         Http()(sys.classicSystem)
           .newServerAt("0.0.0.0", grpcPort)
           .bind(grpcHandler)
-          .map { binding =>
-            logger.info(s"[RouterNode] gRPC Server bound to ${binding.localAddress}")
+          .onComplete {
+            case Success(binding) =>
+              logger.info(s"[RouterNode] gRPC Server bound to ${binding.localAddress}")
+
+            case Failure(ex) =>
+              logger.error("[RouterNode] Failed to bind gRPC server. Terminating ActorSystem.", ex)
+              ctx.system.terminate()
           }(ec)
 
         logger.info("[RouterNode] Waiting for producer nodes to connect over Pekko Cluster...")
@@ -64,9 +78,11 @@ object RouterNode extends LazyLogging {
       config
     )
 
-    logger.info("[RouterNode] System started, press ENTER to terminate...")
-    scala.io.StdIn.readLine()
-    logger.info("[RouterNode] Shutting down...")
-    system.terminate()
+    logger.info("[RouterNode] System started.")
+
+    // Important for systemd:
+    // Do NOT use StdIn.readLine(), because systemd has no terminal.
+    // Keep JVM alive until ActorSystem is terminated.
+    Await.result(system.whenTerminated, Duration.Inf)
   }
 }
